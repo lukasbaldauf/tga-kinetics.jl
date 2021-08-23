@@ -13,7 +13,7 @@ end
 
 function heun!(dt,y0,n,m,temp,dx,y,pe) :: Float64
     """ Integrate along temperature (instead of the usual
-    time) which can vary non-linearly using Heun's method (a predictor-corrector
+    time) using Heun's method (a predictor-corrector
     method). At the same time, subtract the calculated conversion rate and
     from the experimental conversion rate to directly calculate the deviation
     from the two, which is minimized by the optimization algorithm to find the
@@ -31,7 +31,7 @@ function heun!(dt,y0,n,m,temp,dx,y,pe) :: Float64
         for j = 1:m
             y1  = y[i,j]
             f1=dydt(T1, y1, pe,j,m)
-            f2=dydt(T1, y1 + dt * f1, pe,j,m)
+            f2=dydt(T2, y1 + dt * f1, pe,j,m)
             y[i+1,j] = y1 + dt * ( f1+f2) / 2.0
             DY += -pe[j+3*m]*dydt(T1,y1,pe,j,m)
         end
@@ -43,46 +43,57 @@ function heun!(dt,y0,n,m,temp,dx,y,pe) :: Float64
     return OF/(max_rate^2*n)
 end
 
-function get_maxrate(dxi::Float64,max_rate::Float64) :: Float64
-    # Not used
-        return max(max_rate,dxi)
-end
-
-function minimize!(p,pall,indmap,pmat,m,n_d,np,T,DX,N,Y,DT,Y0)
+function minimize!(p,pall,indmap,pmat,m,n_d,np,T,DX,N,Y,DT,Y0;
+    integrator=heun!)
     """
     The objective function to be minimized by some
     minimization algorithm.
+    Change the integrator here to switch from heun!() to rk4!().
     """
     OF  = 0.0
     construct_pmat!(p,pall,indmap,pmat,n_d,m,np)
     for i = 1:n_d
         pe = pmat[i]
-        OF += heun!(DT[i],Y0[i],N[i],m,T[i],DX[i],Y[i],pe)
+        OF += integrator(DT[i],Y0[i],N[i],m,T[i],DX[i],Y[i],pe)
     end
     return OF
 end
 
 
-function rk4!(dt,y0,n,m,temp,dx,y,
-    f1::Float64,f2::Float64,f3::Float64,f4::Float64,p)
+
+function rk4!(dt,y0,n,m,temp,dx,y,pe) :: Float64
+    """Same as heun!(), but using a 4th order Runge-Kutta method to integrate
+    along the temperature profile.
+    At the same time, subtract the calculated conversion rate and
+    from the experimental conversion rate to directly calculate the deviation
+    from the two, which is minimized by the optimization algorithm to find the
+    best kinetic parameters.
+    Interpolates linearly between temperature values.
+    """
     @views y[1,:]=y0
-    OF = 0.0
+    OF ::Float64 = 0.0
+    max_rate = 0.0
     for i = 1:n-1
+        # sum partial components
         DY = 0.0
+        T1 = temp[i]
+        T2 = temp[i+1]
+        dxi = dx[i]
         for j = 1:m
-            T1 = temp[i]
-            T2 = temp[i+1]
             y1  = y[i,j]
-                f1=dydt(T1, y1, p, j, m)
-                f2=dydt((T1 + T2) / 2.0, y1 + dt * f1 / 2.0, p, j, m)
-                f3=dydt((T1 + T2) / 2.0, y1 + dt * f2 / 2.0, p, j, m)
-                f4=dydt(T2, y1 + dt * f3, p, j, m)
-                y[i+1,j] = y1 + dt * ( f1 + 2.0 * f2 + 2.0 * f3 + f4 ) / 6.0
-                DY += -p[j+3*m]*dydt(T1,y1,p,j,m)
+            f1=dydt(T1, y1, pe, j, m)
+            f2=dydt((T1 + T2) / 2.0, y1 + dt * f1 / 2.0, pe, j, m)
+            f3=dydt((T1 + T2) / 2.0, y1 + dt * f2 / 2.0, pe, j, m)
+            f4=dydt(T2, y1 + dt * f3, pe, j, m)
+            y[i+1,j] = y1 + dt * ( f1 + 2.0 * f2 + 2.0 * f3 + f4 ) / 6.0
+            DY += -pe[j+3*m]*dydt(T1,y1,pe,j,m)
         end
-        OF += (dx[i]-DY)^2
+        if dxi > max_rate
+            max_rate = dxi
+        end
+        OF += (dxi-DY)^2
     end
-    return OF
+    return OF/(max_rate^2*n)
 end
 
 function plot_res()
@@ -196,23 +207,33 @@ function toSVector(pmat)
 end
 
 function savetxt(fname)
-        """ Save 'simulated' TGA data."""
+        """ Save calculated TGA data along with experimental data."""
 
         for e in 1:ne
                 f = open(fname*"$e.txt", "w")
                 write(f,"# Simulated TGA data with $nc partial components.\n")
                 write(f, "# Format: component [A, E, n, c, ...(extra_params)... ] \n")
                 out = 0.0*Y[e][:,1]
+                DC = []
                 for c in 1:nc
+                        push!(DC, [-pmat[e][c+3*nc]*dydt(T1,y1,pmat[e],c,nc) for (T1,y1) in zip(T[e],Y[e][:,c])])
                         write(f, "# comp. $c " * string(round.(pmat[e][c,:],digits=4))*"\n")
                         out .= out .+ Y[e][:,c]*pmat[e][c,end]
                 end
-                # normalized mass to "mg"
-                out*=1.43
                 # write to file
                 write(f,"#--------------------------------------------------------------\n")
-                write(f, "# time (min)   Temp (°C)    mass (mg) \n")
-                writedlm(f,[X[e][:,1] X[e][:,2] out], "  ")
+                write(f, "# time (min)   Temp (°C)   exp_mass   calc_mass   -exp_rate")
+                to_write = [X[e][:,1]     X[e][:,2]  X[e][:,3]  out         DX[e]]
+                dsum=0.0*DC[1]
+                for c in 1:nc
+                    write(f,"   -calc_rate_comp.$c")
+                    to_write=cat(to_write,DC[c],dims=2)
+                    dsum .= dsum .+ DC[c]
+                end
+                write(f,"   -sum_calc_rate \n")
+                to_write = cat(to_write,dsum,dims=2)
+                to_write = round.(to_write,digits=6)
+                writedlm(f,to_write, "    ")
 
         end
 end

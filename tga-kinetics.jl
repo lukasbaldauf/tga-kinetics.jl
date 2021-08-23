@@ -73,7 +73,7 @@ construct_pmat!(p0,pall,indmap,pmat,ne,nc,np)
 # Use a closure to call
 # minimize!(minimize!(p,pall,indmap,pmat,nc,ne,np,T,DX,N,Y,DT,Y0))
 # as minimize!(p) and optimize it.
-res=optimize(p->minimize!(p,pall,indmap,pmat,nc,ne,np,T,DX,N,Y,DT,Y0),
+res=optimize(p->minimize!(p,pall,indmap,pmat,nc,ne,np,T,DX,N,Y,DT,Y0,integrator=rk4!),
         p0,
         NelderMead(),
         Optim.Options(iterations=4000))
